@@ -207,7 +207,9 @@ esp_err_t ui_manager_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    memset(s_screens, 0, sizeof(s_screens));
+    /* Note: s_screens is static (zero-initialized at startup).
+     * Screen callbacks are registered BEFORE this function is called,
+     * so we must NOT clear s_screens here. */
 
     BaseType_t ret = xTaskCreatePinnedToCore(
         ui_task, "ui_task", UI_TASK_STACK,

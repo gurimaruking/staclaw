@@ -20,12 +20,12 @@ static const char *TAG = "lcd";
 #define CMD_MADCTL   0x36
 #define CMD_PIXFMT   0x3A
 
-/* DMA transfer buffer: 16 lines at a time */
+/* Work buffer for fill/blit operations */
 #define LCD_LINE_BUF_LINES  16
 #define LCD_LINE_BUF_SIZE   (BSP_LCD_W * LCD_LINE_BUF_LINES * 2)
 
 static spi_device_handle_t s_spi = NULL;
-static uint8_t *s_dma_buf = NULL;
+static uint8_t *s_line_buf = NULL;
 
 /* ---- SPI helpers ---- */
 
@@ -52,28 +52,44 @@ static esp_err_t lcd_cmd_data(uint8_t cmd, const uint8_t *data, size_t len)
     if (len > 0) {
         spi_transaction_t t = {
             .length = len * 8,
-            .tx_buffer = data,
             .user = (void *)1,   /* DC=1 for data */
+            .flags = SPI_TRANS_USE_TXDATA,
         };
-        /* Short data can use inline tx_data */
-        if (len <= 4) {
-            t.flags = SPI_TRANS_USE_TXDATA;
-            memcpy(t.tx_data, data, len);
-            t.tx_buffer = NULL;
+        /* All init data is ≤15 bytes; send via inline tx_data in chunks of 4 */
+        const uint8_t *p = data;
+        size_t remaining = len;
+        while (remaining > 0) {
+            int chunk = (remaining > 4) ? 4 : (int)remaining;
+            t.length = chunk * 8;
+            memset(t.tx_data, 0, 4);
+            memcpy(t.tx_data, p, chunk);
+            esp_err_t err = spi_device_polling_transmit(s_spi, &t);
+            if (err != ESP_OK) return err;
+            p += chunk;
+            remaining -= chunk;
         }
-        return spi_device_polling_transmit(s_spi, &t);
     }
     return ESP_OK;
 }
 
-static esp_err_t lcd_send_data(const uint8_t *data, size_t len)
+/* Send pixel data via SPI FIFO (no DMA). Max 64 bytes per transaction. */
+static esp_err_t lcd_send_pixels(const uint8_t *data, size_t len)
 {
-    spi_transaction_t t = {
-        .length = len * 8,
-        .tx_buffer = data,
-        .user = (void *)1,       /* DC=1 */
-    };
-    return spi_device_transmit(s_spi, &t);  /* DMA for large transfers */
+    const int MAX_CHUNK = 64;   /* ESP32 SPI FIFO = 64 bytes */
+    const uint8_t *p = data;
+    while (len > 0) {
+        int chunk = (len > MAX_CHUNK) ? MAX_CHUNK : (int)len;
+        spi_transaction_t t = {
+            .length = chunk * 8,
+            .tx_buffer = p,
+            .user = (void *)1,       /* DC=1 */
+        };
+        esp_err_t err = spi_device_polling_transmit(s_spi, &t);
+        if (err != ESP_OK) return err;
+        p += chunk;
+        len -= chunk;
+    }
+    return ESP_OK;
 }
 
 static esp_err_t lcd_set_window(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
@@ -94,10 +110,10 @@ esp_err_t bsp_display_init(void)
 {
     esp_err_t err;
 
-    /* Allocate DMA buffer */
-    s_dma_buf = heap_caps_malloc(LCD_LINE_BUF_SIZE, MALLOC_CAP_DMA);
-    if (!s_dma_buf) {
-        ESP_LOGE(TAG, "DMA buffer alloc failed (%d bytes)", LCD_LINE_BUF_SIZE);
+    /* Allocate work buffer in internal SRAM */
+    s_line_buf = heap_caps_malloc(LCD_LINE_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_line_buf) {
+        ESP_LOGE(TAG, "Line buffer alloc failed (%d bytes)", LCD_LINE_BUF_SIZE);
         return ESP_ERR_NO_MEM;
     }
 
@@ -108,16 +124,16 @@ esp_err_t bsp_display_init(void)
     };
     gpio_config(&dc_cfg);
 
-    /* Initialize SPI bus */
+    /* Initialize SPI bus — NO DMA (pure FIFO/polling mode) */
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = BSP_LCD_MOSI,
         .miso_io_num = -1,
         .sclk_io_num = BSP_LCD_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_LINE_BUF_SIZE,
+        .max_transfer_sz = 0,   /* No DMA, no descriptor chain */
     };
-    err = spi_bus_initialize(BSP_LCD_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    err = spi_bus_initialize(BSP_LCD_SPI_HOST, &bus_cfg, SPI_DMA_DISABLED);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
         return err;
@@ -128,7 +144,7 @@ esp_err_t bsp_display_init(void)
         .clock_speed_hz = 40 * 1000 * 1000,  /* 40 MHz */
         .mode = 0,
         .spics_io_num = BSP_LCD_CS,
-        .queue_size = 7,
+        .queue_size = 1,
         .pre_cb = lcd_pre_cb,
     };
     err = spi_bus_add_device(BSP_LCD_SPI_HOST, &dev_cfg, &s_spi);
@@ -137,44 +153,71 @@ esp_err_t bsp_display_init(void)
         return err;
     }
 
-    /* ILI9342C initialization sequence */
+    /* ILI9342C full initialization sequence (M5Stack Core2) */
     lcd_cmd(CMD_SWRESET);
     vTaskDelay(pdMS_TO_TICKS(10));
 
     lcd_cmd(CMD_SLPOUT);
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    /* Display inversion ON (required for ILI9342C correct colors) */
+    /* ---- Power & timing control ---- */
+    { uint8_t d[] = {0x39, 0x2C, 0x00, 0x34, 0x02};
+      lcd_cmd_data(0xCB, d, sizeof(d)); }
+    { uint8_t d[] = {0x00, 0xC1, 0x30};
+      lcd_cmd_data(0xCF, d, sizeof(d)); }
+    { uint8_t d[] = {0x85, 0x00, 0x78};
+      lcd_cmd_data(0xE8, d, sizeof(d)); }
+    { uint8_t d[] = {0x00, 0x00};
+      lcd_cmd_data(0xEA, d, sizeof(d)); }
+    { uint8_t d[] = {0x64, 0x03, 0x12, 0x81};
+      lcd_cmd_data(0xED, d, sizeof(d)); }
+    { uint8_t d[] = {0x20};
+      lcd_cmd_data(0xF7, d, sizeof(d)); }
+
+    { uint8_t d[] = {0x23}; lcd_cmd_data(0xC0, d, 1); }   /* Power Control 1 */
+    { uint8_t d[] = {0x10}; lcd_cmd_data(0xC1, d, 1); }   /* Power Control 2 */
+    { uint8_t d[] = {0x3E, 0x28}; lcd_cmd_data(0xC5, d, 2); } /* VCOM 1 */
+    { uint8_t d[] = {0x86}; lcd_cmd_data(0xC7, d, 1); }   /* VCOM 2 */
+
+    /* ---- Pixel & orientation ---- */
+    { uint8_t d[] = {0x08}; lcd_cmd_data(CMD_MADCTL, d, 1); }
+    { uint8_t d[] = {0x55}; lcd_cmd_data(CMD_PIXFMT, d, 1); }
+
+    { uint8_t d[] = {0x00, 0x18}; lcd_cmd_data(0xB1, d, 2); } /* Frame Rate */
+    { uint8_t d[] = {0x08, 0x82, 0x27}; lcd_cmd_data(0xB6, d, 3); } /* Display Function */
+
+    /* ---- Gamma ---- */
+    { uint8_t d[] = {0x00}; lcd_cmd_data(0xF2, d, 1); }
+    { uint8_t d[] = {0x01}; lcd_cmd_data(0x26, d, 1); }
+    { uint8_t d[] = {0x0F,0x31,0x2B,0x0C,0x0E,0x08,
+                     0x4E,0xF1,0x37,0x07,0x10,0x03,
+                     0x0E,0x09,0x00};
+      lcd_cmd_data(0xE0, d, sizeof(d)); }
+    { uint8_t d[] = {0x00,0x0E,0x14,0x03,0x11,0x07,
+                     0x31,0xC1,0x48,0x08,0x0F,0x0C,
+                     0x31,0x36,0x0F};
+      lcd_cmd_data(0xE1, d, sizeof(d)); }
+
     lcd_cmd(CMD_INVON);
-
-    /* Pixel format: 16-bit RGB565 */
-    uint8_t pixfmt = 0x55;
-    lcd_cmd_data(CMD_PIXFMT, &pixfmt, 1);
-
-    /* Memory access control: landscape, RGB order */
-    /* MY=0, MX=1, MV=1, ML=0, BGR=1, MH=0 = 0x68 for Core2 landscape */
-    uint8_t madctl = 0x08;
-    lcd_cmd_data(CMD_MADCTL, &madctl, 1);
-
     lcd_cmd(CMD_DISPON);
     vTaskDelay(pdMS_TO_TICKS(20));
 
     /* Clear screen to black */
     bsp_display_fill(0, 0, BSP_LCD_W, BSP_LCD_H, BSP_COLOR_BLACK);
 
-    ESP_LOGI(TAG, "ILI9342C initialized (%dx%d, 40MHz SPI)", BSP_LCD_W, BSP_LCD_H);
+    ESP_LOGI(TAG, "ILI9342C initialized (%dx%d, 40MHz SPI, no DMA)", BSP_LCD_W, BSP_LCD_H);
     return ESP_OK;
 }
 
 esp_err_t bsp_display_fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 {
-    if (!s_spi || !s_dma_buf) return ESP_ERR_INVALID_STATE;
+    if (!s_spi || !s_line_buf) return ESP_ERR_INVALID_STATE;
     if (x + w > BSP_LCD_W || y + h > BSP_LCD_H) return ESP_ERR_INVALID_ARG;
 
     lcd_set_window(x, y, w, h);
 
-    /* Fill DMA buffer with color */
-    uint16_t *buf16 = (uint16_t *)s_dma_buf;
+    /* Fill work buffer with color */
+    uint16_t *buf16 = (uint16_t *)s_line_buf;
     int buf_pixels = LCD_LINE_BUF_SIZE / 2;
     int fill_pixels = (buf_pixels < w * LCD_LINE_BUF_LINES) ? buf_pixels : w * LCD_LINE_BUF_LINES;
     for (int i = 0; i < fill_pixels; i++) {
@@ -185,7 +228,7 @@ esp_err_t bsp_display_fill(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint1
     int total_pixels = w * h;
     while (total_pixels > 0) {
         int chunk = (total_pixels < fill_pixels) ? total_pixels : fill_pixels;
-        lcd_send_data(s_dma_buf, chunk * 2);
+        lcd_send_pixels(s_line_buf, chunk * 2);
         total_pixels -= chunk;
     }
 
@@ -199,16 +242,8 @@ esp_err_t bsp_display_blit(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const
 
     lcd_set_window(x, y, w, h);
 
-    /* Send pixel data in chunks via DMA buffer */
-    int total_bytes = w * h * 2;
-    const uint8_t *src = (const uint8_t *)data;
-    while (total_bytes > 0) {
-        int chunk = (total_bytes < LCD_LINE_BUF_SIZE) ? total_bytes : LCD_LINE_BUF_SIZE;
-        memcpy(s_dma_buf, src, chunk);
-        lcd_send_data(s_dma_buf, chunk);
-        src += chunk;
-        total_bytes -= chunk;
-    }
+    /* Send pixel data directly via inline transfers */
+    lcd_send_pixels((const uint8_t *)data, w * h * 2);
 
     return ESP_OK;
 }
