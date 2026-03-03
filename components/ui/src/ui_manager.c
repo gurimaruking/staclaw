@@ -1,5 +1,6 @@
 #include "ui_manager.h"
 #include "ui_font.h"
+#include "ui_font_jp.h"
 #include "ui_status.h"
 #include "bsp_display.h"
 #include "bsp_touch.h"
@@ -15,8 +16,9 @@ static const char *TAG = "ui_mgr";
 #define UI_TASK_PRIO    5
 #define UI_POLL_MS      50    /* Touch polling / redraw interval */
 
-/* Character rendering line buffer: one font-row of one character (8 pixels) */
-static uint16_t s_char_buf[UI_FONT_W * UI_FONT_H];
+/* Pixel buffers for character rendering */
+static uint16_t s_char_buf[UI_FONT_W * UI_FONT_H];       /* 8x16 ASCII */
+static uint16_t s_jp_char_buf[16 * 16];                    /* 16x16 Japanese */
 
 static ui_screen_ops_t s_screens[UI_SCREEN_MAX];
 static ui_screen_t s_active_screen = UI_SCREEN_CHAT;
@@ -24,7 +26,97 @@ static bool s_redraw_pending = true;
 static SemaphoreHandle_t s_mutex = NULL;
 static TaskHandle_t s_task = NULL;
 
+/* ---- UTF-8 decoding ---- */
+
+/**
+ * Decode one UTF-8 character from string. Returns bytes consumed (1-4).
+ */
+static int utf8_decode(const char *s, uint32_t *codepoint)
+{
+    uint8_t c = (uint8_t)s[0];
+    if (c < 0x80) {
+        *codepoint = c;
+        return 1;
+    }
+    if ((c & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        *codepoint = ((c & 0x1F) << 6) | (s[1] & 0x3F);
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        *codepoint = ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        *codepoint = ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+        return 4;
+    }
+    *codepoint = '?';
+    return 1;
+}
+
+/**
+ * Check if a codepoint should be rendered as fullwidth (16px wide).
+ */
+static bool is_fullwidth(uint32_t cp)
+{
+    return cp > 0x7F;
+}
+
+/**
+ * Get pixel width for a codepoint.
+ */
+static int char_pixel_width(uint32_t cp)
+{
+    return is_fullwidth(cp) ? 16 : UI_FONT_W;
+}
+
 /* ---- Drawing primitives ---- */
+
+/**
+ * Draw a fullwidth character (16x16) using Misaki 8x8 font scaled 2x.
+ */
+static int ui_draw_char_wide(uint16_t x, uint16_t y, uint32_t codepoint,
+                             uint16_t fg, uint16_t bg)
+{
+    const uint8_t *glyph = ui_font_jp_glyph(codepoint);
+    if (!glyph) {
+        /* Unknown char: draw a filled square */
+        bsp_display_fill(x, y, 16, 16, bg);
+        return 16;
+    }
+
+    /* Scale 8x8 glyph to 16x16: each pixel becomes a 2x2 block */
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];  /* 7 data bytes + implicit zero 8th row handled by < 8 */
+        if (row >= UI_FONT_JP_BYTES_PER_GLYPH) bits = 0;  /* 8th row */
+        for (int col = 0; col < 8; col++) {
+            uint16_t color = (bits & (0x80 >> col)) ? fg : bg;
+            int px = col * 2;
+            int py = row * 2;
+            s_jp_char_buf[py * 16 + px]         = color;
+            s_jp_char_buf[py * 16 + px + 1]     = color;
+            s_jp_char_buf[(py + 1) * 16 + px]   = color;
+            s_jp_char_buf[(py + 1) * 16 + px + 1] = color;
+        }
+    }
+
+    /* Clip to screen bounds */
+    uint16_t w = 16, h = 16;
+    if (x + w > BSP_LCD_W) w = BSP_LCD_W - x;
+    if (y + h > BSP_LCD_H) h = BSP_LCD_H - y;
+
+    if (w > 0 && h > 0) {
+        if (w == 16 && h == 16) {
+            bsp_display_blit(x, y, 16, 16, s_jp_char_buf);
+        } else {
+            for (int row = 0; row < h; row++) {
+                bsp_display_blit(x, y + row, w, 1, &s_jp_char_buf[row * 16]);
+            }
+        }
+    }
+
+    return 16;
+}
 
 int ui_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg)
 {
@@ -77,8 +169,17 @@ int ui_draw_text(uint16_t x, uint16_t y, uint16_t max_w, const char *text,
             continue;
         }
 
+        /* Decode UTF-8 codepoint */
+        uint32_t cp;
+        int bytes = utf8_decode(text, &cp);
+        int cw = char_pixel_width(cp);
+
         /* Word wrap: if char doesn't fit, go to next line */
-        if (cx + UI_FONT_W > right) {
+        if (cx + cw > right) {
+            /* Clear rest of current line */
+            if (cx < right) {
+                bsp_display_fill(cx, cy, right - cx, UI_FONT_H, bg);
+            }
             cx = x;
             cy += UI_FONT_H;
         }
@@ -86,9 +187,14 @@ int ui_draw_text(uint16_t x, uint16_t y, uint16_t max_w, const char *text,
         /* Stop if we go below screen */
         if (cy + UI_FONT_H > BSP_LCD_H) break;
 
-        ui_draw_char(cx, cy, *text, fg, bg);
-        cx += UI_FONT_W;
-        text++;
+        /* Draw character */
+        if (is_fullwidth(cp)) {
+            ui_draw_char_wide(cx, cy, cp, fg, bg);
+        } else {
+            ui_draw_char(cx, cy, (char)cp, fg, bg);
+        }
+        cx += cw;
+        text += bytes;
     }
 
     /* Clear rest of last line */

@@ -131,6 +131,8 @@ esp_err_t voice_stt_transcribe(const voice_recording_t *rec, const char *api_key
     char auth_header[160];
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_key);
 
+    ESP_LOGI(TAG, "API key prefix: %.8s... (len=%d)", api_key, (int)strlen(api_key));
+
     int body_len = 0;
     char *body = build_multipart_body(rec, boundary, &body_len);
     if (!body) {

@@ -6,6 +6,8 @@
 #include "voice_playback.h"
 #include "bsp_audio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char *TAG = "voice_pipe";
@@ -57,8 +59,10 @@ esp_err_t voice_pipeline_run(char *out_text, size_t text_len)
     /* --- 1. Record --- */
     set_state(VOICE_STATE_RECORDING);
 
-    /* Beep to signal recording start */
-    voice_playback_beep(800, 150);
+    /* Skip beep — speaker and mic share I2S_NUM_0, switching
+     * between STD TX (speaker) and PDM RX (mic) is unreliable.
+     * TODO: re-add beep once I2S port recycling is resolved. */
+    ESP_LOGI(TAG, "Recording starting (no beep)...");
 
     voice_recording_t rec;
     err = voice_capture_alloc(&rec, s_config.max_record_ms, 16000);
@@ -74,9 +78,6 @@ esp_err_t voice_pipeline_run(char *out_text, size_t text_len)
         set_state(VOICE_STATE_IDLE);
         return err != ESP_OK ? err : ESP_ERR_NOT_FOUND;
     }
-
-    /* Beep to signal recording end */
-    voice_playback_beep(600, 100);
 
     /* --- 2. Transcribe --- */
     set_state(VOICE_STATE_TRANSCRIBING);

@@ -94,13 +94,24 @@ esp_err_t net_http_request(const http_request_t *req, http_response_t *resp)
     }
 
     esp_err_t err = esp_http_client_perform(client);
-    if (err == ESP_OK) {
-        resp->status_code = esp_http_client_get_status_code(client);
+
+    /* Always try to capture status code — esp_http_client returns
+     * ESP_ERR_NOT_SUPPORTED on 401 (auth challenge it can't auto-handle)
+     * but the response is still usable for error reporting. */
+    resp->status_code = esp_http_client_get_status_code(client);
+
+    if (err == ESP_OK || resp->status_code > 0) {
         resp->body = buf.data;
         resp->body_len = buf.len;
-        ESP_LOGD(TAG, "HTTP %s %s -> %d (%d bytes)",
-                 req->method ? req->method : "GET", req->url,
-                 resp->status_code, resp->body_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "HTTP %s -> %d (perform: %s)",
+                     req->url, resp->status_code, esp_err_to_name(err));
+        } else {
+            ESP_LOGD(TAG, "HTTP %s %s -> %d (%d bytes)",
+                     req->method ? req->method : "GET", req->url,
+                     resp->status_code, resp->body_len);
+        }
+        err = ESP_OK;  /* Let caller handle HTTP status codes */
     } else {
         ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
         free(buf.data);

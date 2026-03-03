@@ -27,7 +27,7 @@ static void config_set_defaults(staclaw_config_t *cfg)
     strncpy(cfg->stt_provider, "whisper", sizeof(cfg->stt_provider));
     strncpy(cfg->tts_provider, "openai", sizeof(cfg->tts_provider));
     strncpy(cfg->tts_voice, "alloy", sizeof(cfg->tts_voice));
-    cfg->vad_threshold = 500;
+    cfg->vad_threshold = 0;   // 0 = auto-calibrate from ambient noise
 
     cfg->agent_max_iterations = 5;
     cfg->history_max_turns = 20;

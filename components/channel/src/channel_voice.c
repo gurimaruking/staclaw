@@ -8,6 +8,7 @@
 #include "ui_chat.h"
 #include "ui_status.h"
 #include "ui_manager.h"
+#include "net_wifi.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -71,6 +72,19 @@ static void voice_task(void *arg)
         }
 
         ESP_LOGI(TAG, "Voice interaction triggered");
+
+        /* Check WiFi before starting (STT needs network) */
+        if (!net_wifi_is_connected()) {
+            ESP_LOGW(TAG, "WiFi not connected, waiting...");
+            ui_chat_add_message(UI_CHAT_ROLE_SYSTEM, "WiFi connecting...");
+            ui_manager_request_redraw();
+            if (net_wifi_wait_connected(pdMS_TO_TICKS(10000)) != ESP_OK) {
+                ui_chat_add_message(UI_CHAT_ROLE_SYSTEM, "No WiFi");
+                ui_manager_request_redraw();
+                continue;
+            }
+        }
+
         ui_status_set_busy(true);
         ui_manager_request_redraw();
         ui_chat_add_message(UI_CHAT_ROLE_SYSTEM, "Listening...");
@@ -148,7 +162,7 @@ esp_err_t channel_voice_init(const char *openai_api_key,
 
     /* Create voice task */
     BaseType_t ret = xTaskCreatePinnedToCore(
-        voice_task, "voice_task", 8192, NULL, 4, NULL, 1);
+        voice_task, "voice_task", 12288, NULL, 4, NULL, 1);
     if (ret != pdPASS) return ESP_ERR_NO_MEM;
 
     ESP_LOGI(TAG, "Voice channel initialized");

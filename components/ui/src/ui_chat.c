@@ -43,9 +43,9 @@ static SemaphoreHandle_t s_chat_mutex = NULL;
 static ui_chat_send_cb_t s_send_cb = NULL;
 static ui_chat_mic_cb_t s_mic_cb = NULL;
 
-/* Quick-reply button labels */
+/* Quick-reply button labels (UTF-8) */
 static const char *s_quick_replies[] = {
-    "Hello!",
+    "\xe3\x81\x93\xe3\x82\x93\xe3\x81\xab\xe3\x81\xa1\xe3\x81\xaf",  /* こんにちは */
     "Status?",
 };
 #define NUM_QUICK_REPLIES  2
@@ -62,6 +62,20 @@ static int msg_index(int i)
     return (s_msg_head + i) % UI_CHAT_MAX_MESSAGES;
 }
 
+static int utf8_char_width(const char *s, int *bytes_out)
+{
+    uint8_t c = (uint8_t)s[0];
+    if (c < 0x80) {
+        *bytes_out = 1;
+        return 1;  /* ASCII: 1 column (8px) */
+    }
+    if ((c & 0xE0) == 0xC0) { *bytes_out = 2; }
+    else if ((c & 0xF0) == 0xE0) { *bytes_out = 3; }
+    else if ((c & 0xF8) == 0xF0) { *bytes_out = 4; }
+    else { *bytes_out = 1; return 1; }
+    return 2;  /* Non-ASCII: 2 columns (16px) */
+}
+
 static int count_lines(const char *text, int max_chars_per_line)
 {
     int lines = 1;
@@ -70,14 +84,17 @@ static int count_lines(const char *text, int max_chars_per_line)
         if (*text == '\n') {
             lines++;
             col = 0;
+            text++;
         } else {
-            col++;
-            if (col >= max_chars_per_line) {
+            int bytes;
+            int w = utf8_char_width(text, &bytes);
+            col += w;
+            if (col > max_chars_per_line) {
                 lines++;
-                col = 0;
+                col = w;
             }
+            text += bytes;
         }
-        text++;
     }
     return lines;
 }
