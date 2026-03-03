@@ -126,6 +126,9 @@ static void chat_on_draw(void)
         total_lines += 1;  /* Spacing after message */
     }
 
+    ESP_LOGI(TAG, "draw: msgs=%d lines=%d vis=%d start_y=%d",
+             s_msg_count, total_lines, CHAT_VISIBLE_LINES, CHAT_TOP);
+
     /* Start drawing from bottom, respecting scroll offset */
     int visible_lines = CHAT_VISIBLE_LINES;
     int start_line = total_lines - visible_lines - s_scroll_offset;
@@ -177,10 +180,11 @@ static void chat_on_draw(void)
 
         /* Draw message text */
         int text_lines = count_lines(msg->text, chars_per_line);
-        if (current_line >= start_line && draw_y < CHAT_BOTTOM) {
+        if (draw_y < CHAT_BOTTOM && (current_line + text_lines) > start_line) {
+            /* Text overlaps visible area — draw from current draw_y.
+             * If the text starts above the visible window, we still render
+             * it from draw_y (which is at CHAT_TOP), showing the tail end. */
             draw_y = ui_draw_text(CHAT_LEFT, draw_y, CHAT_WIDTH, msg->text, fg_color, COLOR_BG);
-        } else {
-            /* Skip text if above visible area but advance line counter */
         }
         current_line += text_lines;
 
@@ -239,21 +243,34 @@ static void chat_on_touch(uint16_t x, uint16_t y)
         return;
     }
 
-    /* Touch in chat area: scroll up/down */
-    if (y < CHAT_TOP + (CHAT_BOTTOM - CHAT_TOP) / 2) {
-        /* Top half: scroll up */
-        xSemaphoreTake(s_chat_mutex, portMAX_DELAY);
-        s_scroll_offset += 3;
+    /* Tap in chat area: scroll to bottom (reset scroll) */
+    xSemaphoreTake(s_chat_mutex, portMAX_DELAY);
+    if (s_scroll_offset > 0) {
+        s_scroll_offset = 0;
         xSemaphoreGive(s_chat_mutex);
         ui_manager_request_redraw();
     } else {
-        /* Bottom half: scroll down */
-        xSemaphoreTake(s_chat_mutex, portMAX_DELAY);
-        s_scroll_offset -= 3;
-        if (s_scroll_offset < 0) s_scroll_offset = 0;
         xSemaphoreGive(s_chat_mutex);
-        ui_manager_request_redraw();
     }
+}
+
+static void chat_on_gesture(ui_gesture_t gesture, int16_t delta)
+{
+    /* Swipe to scroll chat history */
+    int scroll_lines = delta / 16;  /* Convert pixel delta to line count */
+    if (scroll_lines < 1) scroll_lines = 1;
+
+    xSemaphoreTake(s_chat_mutex, portMAX_DELAY);
+    if (gesture == UI_GESTURE_SWIPE_UP) {
+        /* Swipe up: scroll to see older messages */
+        s_scroll_offset += scroll_lines;
+    } else {
+        /* Swipe down: scroll to see newer messages */
+        s_scroll_offset -= scroll_lines;
+        if (s_scroll_offset < 0) s_scroll_offset = 0;
+    }
+    xSemaphoreGive(s_chat_mutex);
+    ui_manager_request_redraw();
 }
 
 /* ---- Public API ---- */
@@ -268,9 +285,10 @@ esp_err_t ui_chat_init(void)
     s_scroll_offset = 0;
 
     static const ui_screen_ops_t chat_ops = {
-        .on_enter = chat_on_enter,
-        .on_draw  = chat_on_draw,
-        .on_touch = chat_on_touch,
+        .on_enter   = chat_on_enter,
+        .on_draw    = chat_on_draw,
+        .on_touch   = chat_on_touch,
+        .on_gesture = chat_on_gesture,
     };
     ui_manager_register_screen(UI_SCREEN_CHAT, &chat_ops);
 
@@ -281,6 +299,7 @@ esp_err_t ui_chat_init(void)
 void ui_chat_add_message(ui_chat_role_t role, const char *text)
 {
     if (!text) return;
+    ESP_LOGI(TAG, "add_msg role=%d len=%d: %.40s", role, (int)strlen(text), text);
 
     xSemaphoreTake(s_chat_mutex, portMAX_DELAY);
 

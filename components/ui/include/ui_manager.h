@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * Screen IDs for the UI manager.
@@ -14,13 +15,22 @@ typedef enum {
 } ui_screen_t;
 
 /**
+ * Gesture types detected by the UI manager.
+ */
+typedef enum {
+    UI_GESTURE_SWIPE_UP,
+    UI_GESTURE_SWIPE_DOWN,
+} ui_gesture_t;
+
+/**
  * Screen lifecycle callbacks.
  */
 typedef struct {
     void (*on_enter)(void);     // Called when screen becomes active
     void (*on_leave)(void);     // Called when screen is deactivated
     void (*on_draw)(void);      // Redraw the screen
-    void (*on_touch)(uint16_t x, uint16_t y);  // Touch event
+    void (*on_touch)(uint16_t x, uint16_t y);  // Tap event
+    void (*on_gesture)(ui_gesture_t gesture, int16_t delta);  // Swipe gesture
 } ui_screen_ops_t;
 
 /**
