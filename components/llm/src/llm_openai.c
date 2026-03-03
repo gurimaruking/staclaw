@@ -262,7 +262,7 @@ static esp_err_t openai_chat(llm_provider_t *self,
     if (sse_ctx.text_buf) sse_ctx.text_buf[0] = '\0';
     if (sse_ctx.tool_args_buf) sse_ctx.tool_args_buf[0] = '\0';
 
-    char auth_header[160];
+    char auth_header[300];
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", ctx->api_key);
 
     http_request_t req = {

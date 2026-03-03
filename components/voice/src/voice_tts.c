@@ -31,7 +31,7 @@ esp_err_t voice_tts_synthesize(const char *text, const char *api_key,
     cJSON_Delete(root);
     if (!json_body) return ESP_ERR_NO_MEM;
 
-    char auth_header[160];
+    char auth_header[300];
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_key);
 
     http_request_t req = {

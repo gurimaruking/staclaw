@@ -128,7 +128,7 @@ esp_err_t voice_stt_transcribe(const voice_recording_t *rec, const char *api_key
     char content_type[80];
     snprintf(content_type, sizeof(content_type), "multipart/form-data; boundary=%s", boundary);
 
-    char auth_header[160];
+    char auth_header[300];
     snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_key);
 
     ESP_LOGI(TAG, "API key prefix: %.8s... (len=%d)", api_key, (int)strlen(api_key));
