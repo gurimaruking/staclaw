@@ -18,7 +18,7 @@ import tempfile
 
 IDF_PATH = os.environ.get("IDF_PATH", r"C:\Espressif\frameworks\esp-idf-v5.5.2-2")
 PYTHON = os.environ.get("IDF_PYTHON", r"C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe")
-NVS_TOOL = os.path.join(IDF_PATH, "components", "nvs_flash", "nvs_partition_gen", "nvs_partition_gen.py")
+NVS_TOOL = os.path.join(IDF_PATH, "components", "nvs_flash", "nvs_partition_generator", "nvs_partition_gen.py")
 ESPTOOL = os.path.join(IDF_PATH, "components", "esptool_py", "esptool", "esptool.py")
 
 NVS_SIZE = 0x6000  # 24KB, must match partitions.csv

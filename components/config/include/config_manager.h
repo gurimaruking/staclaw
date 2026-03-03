@@ -10,7 +10,7 @@ typedef struct {
 
     // LLM
     char claude_api_key[128];
-    char openai_api_key[128];
+    char openai_api_key[256];
     char active_provider[16];     // "claude" or "openai"
     char claude_model[48];
     char openai_model[48];

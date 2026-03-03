@@ -65,8 +65,6 @@ bool bsp_touch_read(bsp_touch_point_t *point)
     /* Extract touch coordinates */
     uint16_t x = ((buf[1] & 0x0F) << 8) | buf[2];
     uint16_t y = ((buf[3] & 0x0F) << 8) | buf[4];
-
-    /* Clamp to display dimensions */
     if (x >= BSP_LCD_W) x = BSP_LCD_W - 1;
     if (y >= BSP_LCD_H) y = BSP_LCD_H - 1;
 

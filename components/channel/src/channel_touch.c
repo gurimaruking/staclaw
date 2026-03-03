@@ -15,7 +15,7 @@ static const char *TAG = "ch_touch";
 
 #define TOUCH_MSG_MAX_LEN  256
 #define TOUCH_QUEUE_SIZE   4
-#define TOUCH_TASK_STACK   (8 * 1024)
+#define TOUCH_TASK_STACK   (12 * 1024)
 #define TOUCH_TASK_PRIO    4
 
 static QueueHandle_t s_msg_queue = NULL;

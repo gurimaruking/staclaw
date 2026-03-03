@@ -1,4 +1,5 @@
 #include "channel_router.h"
+#include "net_wifi.h"
 #include "esp_log.h"
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,20 @@ esp_err_t channel_router_handle(const channel_message_t *msg)
 {
     if (!s_agent || !msg || !msg->text) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    // Wait for WiFi before making API calls
+    if (!net_wifi_is_connected()) {
+        ESP_LOGW(TAG, "WiFi not connected, waiting...");
+        esp_err_t wifi_err = net_wifi_wait_connected(pdMS_TO_TICKS(10000));
+        if (wifi_err != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi not available");
+            if (s_reply_cbs[msg->channel]) {
+                s_reply_cbs[msg->channel](msg->channel, msg->sender_id,
+                                           "WiFi not connected. Please wait.", msg->channel_data);
+            }
+            return ESP_FAIL;
+        }
     }
 
     ESP_LOGI(TAG, "Message from channel %d: %.40s%s",

@@ -69,15 +69,25 @@ esp_err_t net_stream_sse(const http_request_t *req,
         return ESP_FAIL;
     }
 
-    // Parse SSE stream
-    char line_buf[4096];
+    // Parse SSE stream - use heap buffers to avoid stack overflow
+    #define SSE_LINE_BUF_SIZE 4096
+    #define SSE_READ_BUF_SIZE 1024
+    char *line_buf = malloc(SSE_LINE_BUF_SIZE);
+    char *read_buf = malloc(SSE_READ_BUF_SIZE);
+    if (!line_buf || !read_buf) {
+        free(line_buf);
+        free(read_buf);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
     int line_pos = 0;
     char current_event[64] = {0};
-    char read_buf[1024];
     bool aborted = false;
 
     while (!aborted) {
-        int rlen = esp_http_client_read(client, read_buf, sizeof(read_buf) - 1);
+        int rlen = esp_http_client_read(client, read_buf, SSE_READ_BUF_SIZE - 1);
         if (rlen <= 0) break; // EOF or error
 
         for (int i = 0; i < rlen && !aborted; i++) {
@@ -109,13 +119,15 @@ esp_err_t net_stream_sse(const http_request_t *req,
                 }
                 line_pos = 0;
             } else if (c != '\r') {
-                if (line_pos < (int)sizeof(line_buf) - 1) {
+                if (line_pos < SSE_LINE_BUF_SIZE - 1) {
                     line_buf[line_pos++] = c;
                 }
             }
         }
     }
 
+    free(line_buf);
+    free(read_buf);
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     return ESP_OK;
