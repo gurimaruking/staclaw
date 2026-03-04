@@ -63,6 +63,8 @@ static void cron_trigger_cb(const char *job_name, const char *message, void *use
 static void init_sntp(void)
 {
     ESP_LOGI(TAG, "Initializing SNTP");
+    setenv("TZ", "JST-9", 1);
+    tzset();
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
