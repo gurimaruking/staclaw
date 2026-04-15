@@ -80,8 +80,12 @@ static int ui_draw_char_wide(uint16_t x, uint16_t y, uint32_t codepoint,
 {
     const uint8_t *glyph = ui_font_jp_glyph(codepoint);
     if (!glyph) {
-        /* Unknown char: draw a filled square */
-        bsp_display_fill(x, y, 16, 16, bg);
+        /* Unknown char: draw a visible bordered rectangle (□) */
+        bsp_display_fill(x, y, 16, 1, fg);          /* top */
+        bsp_display_fill(x, y + 15, 16, 1, fg);     /* bottom */
+        bsp_display_fill(x, y + 1, 1, 14, fg);      /* left */
+        bsp_display_fill(x + 15, y + 1, 1, 14, fg); /* right */
+        bsp_display_fill(x + 1, y + 1, 14, 14, bg); /* center */
         return 16;
     }
 
@@ -251,12 +255,22 @@ void ui_manager_request_redraw(void)
     s_redraw_pending = true;
 }
 
+/* ---- Gesture detection ---- */
+
+#define SWIPE_THRESHOLD     30   /* Minimum Y delta (pixels) for swipe */
+#define TAP_MAX_MOVE        15   /* Max movement to still count as a tap */
+#define TOUCH_TIMEOUT_MS    500  /* Max touch duration for gestures */
+
 /* ---- UI task ---- */
 
 static void ui_task(void *arg)
 {
     bsp_touch_point_t touch;
-    TickType_t last_touch_tick = 0;
+    bool was_touching = false;
+    uint16_t touch_start_x = 0, touch_start_y = 0;
+    uint16_t touch_last_y = 0;
+    TickType_t touch_start_tick = 0;
+    TickType_t last_event_tick = 0;
 
     ESP_LOGI(TAG, "UI task started");
 
@@ -267,20 +281,53 @@ static void ui_task(void *arg)
     s_redraw_pending = true;
 
     while (1) {
-        /* Handle touch input */
-        if (bsp_touch_read(&touch) && touch.pressed) {
-            TickType_t now = xTaskGetTickCount();
-            /* Debounce: 200ms between touch events */
-            if (now - last_touch_tick > pdMS_TO_TICKS(200)) {
-                last_touch_tick = now;
+        bool touching = bsp_touch_read(&touch) && touch.pressed;
+        TickType_t now = xTaskGetTickCount();
 
-                xSemaphoreTake(s_mutex, portMAX_DELAY);
-                if (s_screens[s_active_screen].on_touch) {
-                    s_screens[s_active_screen].on_touch(touch.x, touch.y);
+        if (touching && !was_touching) {
+            /* Touch down: record start position */
+            touch_start_x = touch.x;
+            touch_start_y = touch.y;
+            touch_last_y = touch.y;
+            touch_start_tick = now;
+        } else if (!touching && was_touching) {
+            /* Touch up: determine gesture */
+            TickType_t duration = now - touch_start_tick;
+
+            if (duration < pdMS_TO_TICKS(TOUCH_TIMEOUT_MS)) {
+                int16_t dy = (int16_t)touch_last_y - (int16_t)touch_start_y;
+                int16_t abs_dy = dy < 0 ? -dy : dy;
+                int16_t dx = (int16_t)touch_last_y - (int16_t)touch_start_x;
+                /* Unused: int16_t abs_dx = dx < 0 ? -dx : dx; */
+                (void)dx;
+
+                if (abs_dy >= SWIPE_THRESHOLD) {
+                    /* Swipe gesture detected */
+                    ui_gesture_t gesture = (dy < 0) ? UI_GESTURE_SWIPE_UP : UI_GESTURE_SWIPE_DOWN;
+                    xSemaphoreTake(s_mutex, portMAX_DELAY);
+                    if (s_screens[s_active_screen].on_gesture) {
+                        s_screens[s_active_screen].on_gesture(gesture, abs_dy);
+                    }
+                    xSemaphoreGive(s_mutex);
+                    last_event_tick = now;
+                } else if (abs_dy < TAP_MAX_MOVE) {
+                    /* Tap */
+                    if (now - last_event_tick > pdMS_TO_TICKS(100)) {
+                        xSemaphoreTake(s_mutex, portMAX_DELAY);
+                        if (s_screens[s_active_screen].on_touch) {
+                            s_screens[s_active_screen].on_touch(touch_start_x, touch_start_y);
+                        }
+                        xSemaphoreGive(s_mutex);
+                        last_event_tick = now;
+                    }
                 }
-                xSemaphoreGive(s_mutex);
             }
+        } else if (touching && was_touching) {
+            /* Touch move: update last position */
+            touch_last_y = touch.y;
         }
+
+        was_touching = touching;
 
         /* Handle redraws */
         if (s_redraw_pending) {

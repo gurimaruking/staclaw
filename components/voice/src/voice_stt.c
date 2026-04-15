@@ -59,7 +59,7 @@ static char *build_multipart_body(const voice_recording_t *rec,
 
     /* Pre-calculate parts */
     const char *model = "whisper-1";
-    const char *lang = "en";
+    const char *lang = "ja";
 
     /* Estimate total body size */
     size_t est_size = wav_size + 1024; /* wav + overhead for multipart parts */

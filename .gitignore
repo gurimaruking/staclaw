@@ -21,3 +21,7 @@ __pycache__/
 # NVS credentials (contains API keys, passwords)
 nvs_config.csv
 nvs_config.bin
+
+# Generated font data (intermediate files)
+misakiUTF16FontData_raw.h
+misaki_font_data.h
